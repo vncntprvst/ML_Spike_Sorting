@@ -2,4 +2,6 @@
 /Data/
 /trained_models/
 /wandb/
-/utils/__pycache__/
+__pycache__/
+*.pyc
+

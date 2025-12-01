@@ -73,6 +73,7 @@ class Config_Preprocessing(object):
 
         # Filtering
         self.FILTERING_METHOD = "Butter_bandpass"
+        self.filtering_method = self.FILTERING_METHOD  # lowercase alias for filter_signal.py
         self.FREQUENCIES = [300, 3000]
         self.ORDER = 2
 
@@ -87,5 +88,8 @@ class Config_Preprocessing(object):
 
         # Model Saving Configuration
         self.SAVE_WEIGHTS = True  # Flag to save model weights
-        self.SAVE_PATH = "/rds/user/mb2315/hpc-work/Data/Saved_Models/Spike_File_" + self.FILE_NAME + ".pkl" # Directory for saving the model
+        # Derive save path from data path directory
+        data_dir = self.DATA_PATH.rpartition('/')[0]
+        self.DATA_SAVE_PATH = data_dir + "/Spike_File_" + self.FILE_NAME + ".pkl"
+        self.SAVE_PATH = self.DATA_SAVE_PATH  # Alias for backward compatibility
 

@@ -6,9 +6,9 @@ from utils.model_predict import *
 from utils.clustering import *
 from utils.wandb_initializer import *
 from utils.finetune_models import *
-#from utils.file_opener_raw_recording_data import *
-#from utils.filter_signal import *
-#from utils.spike_detection import *
+from utils.file_opener_raw_recording_data import *
+from utils.filter_signal import *
+from utils.spike_detection import *
 
 
 from config_files.config_finetune import *
@@ -58,9 +58,163 @@ class Run:
 
 
     def extract_spikes_from_raw_recording(self):
-        recording_data, electrode_stream, fsample = file_opener_raw_recording_data(self.data_preprocessing_config)
-        filtered_signal = filter_signal(recording_data, fsample, self.data_preprocessing_config)
-        spike_file = spike_detection(filtered_signal, electrode_stream, fsample, self.data_preprocessing_config)
+        """Extract spikes from raw recording, using chunked processing for large files."""
+        import os
+        import h5py
+        
+        path = self.data_preprocessing_config.DATA_PATH
+        
+        # Check file size to decide on chunked vs full processing
+        file_size_gb = os.path.getsize(path) / (1024**3) if os.path.exists(path) else 0
+        
+        # Use chunked processing for files > 10GB
+        if file_size_gb > 10:
+            print(f"[extract_spikes] Large file detected ({file_size_gb:.1f} GB). Using chunked processing...")
+            self._extract_spikes_chunked()
+        else:
+            print(f"[extract_spikes] Small file ({file_size_gb:.1f} GB). Using standard processing...")
+            recording_data, electrode_stream, fsample = file_opener_raw_recording_data(self.data_preprocessing_config)
+            filtered_signal = filter_signal(recording_data, fsample, self.data_preprocessing_config)
+            spike_file = spike_detection(filtered_signal, electrode_stream, fsample, self.data_preprocessing_config)
+
+    def _extract_spikes_chunked(self):
+        """Process large recordings in chunks to avoid OOM."""
+        import h5py
+        import pickle
+        import math
+        from utils.filter_signal import butter_bandpass, butter_bandpass_high, ellip_filter
+        from scipy.signal import lfilter
+        
+        config = self.data_preprocessing_config
+        path = config.DATA_PATH
+        
+        # Parameters
+        chunk_duration_sec = config.INTERVAL_LENGTH  # Use same chunk size as spike detection (300s default)
+        overlap_samples = 1000  # Overlap to avoid edge effects in filtering
+        
+        print(f"[chunked] Opening {path}")
+        
+        with h5py.File(path, 'r') as f:
+            # Get metadata
+            if 'sample_rate' in f.attrs:
+                fsample = int(f.attrs['sample_rate'])
+            elif 'sampling_frequency' in f.attrs:
+                fsample = int(f.attrs['sampling_frequency'])
+            else:
+                raise ValueError("HDF5 file missing sample_rate attribute")
+            
+            dataset = f['recording']
+            total_frames, num_channels = dataset.shape
+            chunk_frames = int(chunk_duration_sec * fsample)
+            
+            print(f"[chunked] Recording: {total_frames} frames, {num_channels} channels, {fsample} Hz")
+            print(f"[chunked] Duration: {total_frames/fsample/60:.1f} minutes")
+            print(f"[chunked] Processing in {chunk_duration_sec}s chunks ({chunk_frames} frames)")
+            
+            # Create electrode stream for channel info
+            electrode_stream = SimpleElectrodeStream(num_channels)
+            ids = [c.channel_id for c in electrode_stream.channel_infos.values()]
+            
+            # Spike detection parameters from config
+            min_TH = config.MIN_TH
+            max_TH = config.MAX_TH
+            points_pre = config.DAT_POINTS_PRE_MIN
+            points_post = config.DAT_POINTS_POST_MIN
+            refrec_period = config.REFREC_PERIOD
+            reject_ch = config.REJECT_CHANNELS or [None]
+            
+            # Get filter coefficients once
+            frequencies = config.FREQUENCIES
+            order = config.ORDER
+            lowcut, highcut = frequencies[0], frequencies[1]
+            from scipy.signal import butter
+            nyq = 0.5 * fsample
+            b, a = butter(order, [lowcut/nyq, highcut/nyq], btype='bandpass')
+            
+            # Accumulate all spikes
+            all_spikes = []
+            spike_times_per_channel = [[0] for _ in range(num_channels)]
+            
+            num_chunks = math.ceil(total_frames / chunk_frames)
+            
+            for chunk_idx in range(num_chunks):
+                start_frame = chunk_idx * chunk_frames
+                # Add overlap at the end, but not past the file
+                end_frame = min(start_frame + chunk_frames + overlap_samples, total_frames)
+                actual_chunk_frames = end_frame - start_frame
+                
+                print(f"[chunked] Processing chunk {chunk_idx+1}/{num_chunks} (frames {start_frame}-{end_frame})")
+                
+                # Load chunk
+                chunk_data = dataset[start_frame:end_frame, :]
+                
+                # Apply scale if present
+                if 'scale_to_uV' in f.attrs:
+                    chunk_data = chunk_data * f.attrs['scale_to_uV']
+                
+                # Filter the chunk
+                filtered_chunk = lfilter(b, a, chunk_data, axis=0)
+                
+                # Spike detection on this chunk (adapted from spike_detection.py)
+                med = np.median(np.absolute(filtered_chunk) / 0.6745, axis=0)
+                
+                for index in range(len(filtered_chunk)):
+                    # Skip overlap region except for last chunk
+                    if chunk_idx < num_chunks - 1 and index >= chunk_frames:
+                        continue
+                    
+                    if points_pre < index < len(filtered_chunk) - points_post:
+                        global_index = start_frame + index
+                        
+                        threshold_cross = filtered_chunk[index, :] < min_TH * med
+                        threshold_arti = filtered_chunk[index, :] > max_TH * med
+                        probable_spike = threshold_cross * threshold_arti
+                        
+                        if np.sum(probable_spike > 0):
+                            for e in range(num_channels):
+                                if probable_spike[e] == 1:
+                                    channel_id = ids[e]
+                                    channel_info = electrode_stream.channel_infos[channel_id]
+                                    ch = int(channel_info.info['Label'][-2:])
+                                    
+                                    if ch not in reject_ch:
+                                        t_diff = global_index - spike_times_per_channel[e][-1]
+                                        if t_diff > refrec_period * fsample:
+                                            # Check if local minimum
+                                            if filtered_chunk[index, e] == np.min(
+                                                    filtered_chunk[max(0, index-points_pre):min(len(filtered_chunk), index+points_post), e]):
+                                                spike_times_per_channel[e].append(global_index)
+                                                
+                                                # Extract waveform if within bounds
+                                                if global_index + points_post < total_frames and index >= points_pre:
+                                                    spk_wave = list(filtered_chunk[index-points_pre:index+points_post, e])
+                                                    spk_wave.insert(0, global_index)  # spike time
+                                                    spk_wave.insert(0, ch)  # channel
+                                                    all_spikes.append(spk_wave)
+                
+                # Free memory
+                del chunk_data, filtered_chunk
+                import gc
+                gc.collect()
+        
+        print(f"[chunked] Total spikes detected: {len(all_spikes)}")
+        
+        # Save results
+        if len(all_spikes) == 0:
+            print("Warning: No spikes detected.")
+            results = {"Filename": config.FILE_NAME, "Sampling rate": fsample, 
+                       "Recording len": total_frames / fsample, "Raw_spikes": np.array([])}
+        else:
+            dat_arr = np.array(all_spikes)
+            results = {"Filename": config.FILE_NAME, "Sampling rate": fsample,
+                       "Recording len": total_frames / fsample, 
+                       "Raw_spikes": dat_arr[dat_arr[:, 1].argsort()]}
+        
+        save_path = config.DATA_PATH.rpartition('/')[0]
+        output_file = f"{save_path}/Spike_File_{config.FILE_NAME}.pkl"
+        with open(output_file, 'wb+') as f:
+            pickle.dump(results, f, -1)
+        print(f"[chunked] Saved spikes to {output_file}")
 
     def prepare_data(self):
         print('---' * 30)
