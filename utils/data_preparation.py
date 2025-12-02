@@ -144,10 +144,12 @@ def data_preparation(model_config, data_preprocessing_config, pretraining_config
         number_of_test_samples = int(split * spikes.shape[0])
         pretraining_config.QUEUE_SIZE = int(pretraining_config.QUEUE_SIZE * spikes.shape[0])
         x_test = spikes[-number_of_test_samples:, :]
+        electrode = electrode.reshape(-1, 1)
+        spike_times = spike_times.reshape(-1, 1)
         y = np.concatenate((electrode, spike_times), axis=1)
         y_test = y[-number_of_test_samples:, :]
         x_train = spikes[:-number_of_test_samples, :]
-        y_train = electrode[:-number_of_test_samples,:]
+        y_train = electrode[:-number_of_test_samples, :]
 
         dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train)).batch(batch_size, drop_remainder=False)
         dataset_test = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(batch_size, drop_remainder=False)
