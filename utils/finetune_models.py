@@ -620,7 +620,7 @@ class PseudoLabel(object):
             run_eagerly=True)
 
         # Training the model with logging
-        from wandb.keras import WandbMetricsLogger
+        from wandb.integration.keras import WandbMetricsLogger
         finetuning_history = finetuning_model.fit(
             dataset_pseudolabeled, epochs=self.epochs, validation_data=dataset_unlabellabed, verbose=1,
             callbacks=[WandbMetricsLogger()])
@@ -688,7 +688,7 @@ class PseudoLabel(object):
             run_eagerly=True)
 
         # Training the model with logging
-        from wandb.keras import WandbMetricsLogger
+        from wandb.integration.keras import WandbMetricsLogger
         finetuning_model.fit(
             dataset_pseudolabeled, epochs=self.epochs, validation_data=dataset_unlabellabed, verbose=0,
             callbacks=[WandbMetricsLogger()])

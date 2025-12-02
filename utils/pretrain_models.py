@@ -560,7 +560,7 @@ def pretrain_model(model, model_config, pretraining_config, pretrain_method, dat
         nnclr.compile(contrastive_optimizer=tf.keras.optimizers.Adam(learning_rate=pretraining_config.
                                                                      LEARNING_RATE_NNCLR),
                       probe_optimizer=tf.keras.optimizers.Adam(learning_rate=pretraining_config.LEARNING_RATE_NNCLR))
-        from wandb.keras import WandbMetricsLogger
+        from wandb.integration.keras import WandbMetricsLogger
         nnclr.fit(dataset,
                   epochs=pretraining_config.NUM_EPOCHS_NNCLR,
                   validation_data=dataset_test,
